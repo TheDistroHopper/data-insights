@@ -1,0 +1,4 @@
+venv
+.env
+data_insights.db
+__pycache__

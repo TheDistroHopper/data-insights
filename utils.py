@@ -30,7 +30,7 @@ class PromptTemplate:
 
     @staticmethod
     def get_analysis_prompt(query: str, metadata_str: str) -> str:
-        return """
+        return f"""
         You are an expert business intelligence analyst. Analyze the following:
         
         USER QUERY: {query}
@@ -42,19 +42,19 @@ class PromptTemplate:
         TASK:
         1. For general questions about available insights:
            - Analyze the table structure and relationships
-           - Suggest 2-3 concrete, specific insights that could be generated
+           - Suggest exactly one concrete, specific insight that could be generated
            - Focus on business value and actionable information
-           - DO NOT say "this is a general question" or ask for refinement
+           - DO NOT ask for query refinement or say the question is too general
            
         2. For specific analysis questions:
-           - Generate specific insights with SQL queries
-           - Include business value and visualization suggestions
+           - Generate specific insights with SQL queries for bar chart only
+           - Include business value and visualization suggestions specific
         
         OUTPUT FORMAT:
         If asking about available insights:
         {{
             "response_type": "info",
-            "answer": "Based on the available data, I can provide insights about: 1) [First specific insight possibility], 2) [Second specific insight possibility], 3) [Third specific insight possibility]"
+            "answer": "Based on the available data, I can provide insights about: [Insight possibility]"
         }}
         
         If asking for specific analysis:
@@ -64,38 +64,47 @@ class PromptTemplate:
                 {{
                     "insight": "Clear description of what we're looking for",
                     "business_value": "1-2 sentence explanation of why this matters",
-                    "sql_query": "Optimized SQL query",
-                    "visualization": "Suggested chart type (e.g., line_chart, bar_chart, heatmap)",
-                    "metrics": ["list", "of", "key", "metrics"]
+                    "sql_query": "Optimized SQL query with properly defined X and Y columns",
+                    "visualization": "bar_chart",
+                    "metrics": ["X_column", "Y_column"]
                 }}
             ]
         }}
         
-        EXAMPLES:
+        SQL REQUIREMENTS:
+        - Use simple column names in the final SELECT statement without table prefixes
+        - Format SQL queries as: 
+          SELECT 
+              table_name.column_name AS column_name
+          FROM...
+        - Ensure metrics array contains simple column names without table prefixes
+        - Format metrics as ["column_name", "column_name"] not ["table_name.column_name"]
+        - Always use fully qualified column names to avoid ambiguity (e.g., table_name.column_name)
+        - Format SQL queries with proper spacing and line breaks
+        - Each SQL clause should be on a new line
+        - Use single quotes for string literals in SQL
+        - Ensure all column references exist in the provided metadata
+        - Use appropriate joins when combining tables based on their relationships
+        - Ensure the SQL query has well-defined columns suitable for bar charts, line charts, and heatmaps
+        - Validate column names before generating SQL queries.
+
         
-        If user asks "What insights can you provide?", looking at:
+        EXAMPLES:
+        If user asks "What insights can you provide?", and metadata includes:
         {{
-            "sales_data": ["product_id", "product_name", "sales_amount", "sale_date", "region"],
-            "product_info": ["product_id", "category", "price"]
+            "orders": ["order_id", "customer_id", "order_date", "total_amount"],
+            "customers": ["customer_id", "customer_name", "region"]
         }}
         
         Respond with:
         {{
             "response_type": "info",
-            "answer": "Based on the available data, I can provide insights about: 1) Sales performance trends across different regions and time periods, 2) Product category revenue analysis and pricing distribution, 3) Regional product preferences and bestsellers"
+            "answer": "Based on the available data, I can provide insights about: 1) Customer purchasing trends over time (line_chart), 2) Regional revenue distribution (bar_chart), 3) Order frequency heatmap by date and region (heatmap)."
         }}
-        
-        REQUIREMENTS:
-        - For general questions, always analyze the schema and suggest concrete insights
-        - For specific queries, provide SQL without string concatenation
-        - Format SQL queries with proper spacing and line breaks
-        - Each SQL clause should be on a new line
-        - Ensure all column references exist in the provided metadata
-        - Use single quotes for string literals in SQL
         
         Now, analyze the following query:
         {query}
-        """.format(query=query, metadata_str=metadata_str)
+        """
 
 
 class InsightGenerator:
@@ -114,10 +123,16 @@ class InsightGenerator:
         # Add spaces after commas in SQL queries
         cleaned_text = re.sub(r",(?=\w)", ", ", cleaned_text)
 
+        cleaned_text = re.sub(
+            r"\\\s", " ", cleaned_text
+        )  # Remove backslash before spaces
+
         # Fix spacing around SQL keywords
-        sql_keywords = ["SELECT", "FROM", "WHERE", "GROUP BY", "ORDER BY", "JOIN", "ON"]
+        sql_keywords = ["SELECT", "FROM", "WHERE",
+                        "GROUP BY", "ORDER BY", "JOIN", "ON"]
         for keyword in sql_keywords:
-            cleaned_text = re.sub(rf"\b{keyword}\b(?!\s)", f"{keyword} ", cleaned_text)
+            cleaned_text = re.sub(
+                rf"\b{keyword}\b(?!\s)", f"{keyword} ", cleaned_text)
 
         # Remove excessive whitespace while preserving SQL formatting
         cleaned_text = re.sub(r"\s+", " ", cleaned_text)
@@ -149,32 +164,30 @@ class InsightGenerator:
         try:
             # First try to parse as JSON
             response_dict = json.loads(cleaned_response)
-            
+
             if response_dict.get("response_type") == "info":
                 return AnalysisResponse(
                     response_type="info",
-                    answer=response_dict.get("answer", "No answer provided.")
+                    answer=response_dict.get("answer", "No answer provided."),
                 )
             elif response_dict.get("response_type") == "analysis":
-                insights = [Insight(**insight) for insight in response_dict.get("insights", [])]
+                insights = [
+                    Insight(**insight) for insight in response_dict.get("insights", [])
+                ]
                 return AnalysisResponse(response_type="analysis", insights=insights)
             else:
                 return AnalysisResponse(
                     response_type="error",
-                    answer=f"Unknown response type: {response_dict.get('response_type')}"
+                    answer=f"Unknown response type: {response_dict.get('response_type')}",
                 )
 
         except json.JSONDecodeError as e:
             # If the response is a plain text error message, return it directly
             if "unable to generate" in cleaned_response.lower():
-                return AnalysisResponse(
-                    response_type="error",
-                    answer=cleaned_response
-                )
+                return AnalysisResponse(response_type="error", answer=cleaned_response)
             # Otherwise return the parsing error
             return AnalysisResponse(
-                response_type="error",
-                answer=f"Failed to parse response: {str(e)}"
+                response_type="error", answer=f"Failed to parse response: {str(e)}"
             )
 
     def generate_insights(
@@ -186,6 +199,7 @@ class InsightGenerator:
 
         try:
             response = self.model.generate_content(prompt)
+            print(response)
             if not response.text:
                 return AnalysisResponse(
                     response_type="error",
@@ -210,7 +224,7 @@ class ChatInterface:
         self.response_formatters = {
             "info": self._format_info_response,
             "analysis": self._format_analysis_response,
-            "error": self._format_error_response
+            "error": self._format_error_response,
         }
 
     def _format_info_response(self, response: AnalysisResponse) -> str:
@@ -226,13 +240,15 @@ class ChatInterface:
 
     def _format_insight(self, insight: Insight) -> str:
         """Format a single insight"""
-        return "\n".join([
-            f"\n💡 Insight: {insight.insight}",
-            f"📊 Business Value: {insight.business_value}",
-            f"📈 Visualization: {insight.visualization}",
-            f"📊 Key Metrics: {', '.join(insight.metrics)}",
-            f"📝 SQL:\n{insight.sql_query}\n"
-        ])
+        return "\n".join(
+            [
+                f"\n Insight: {insight.insight}",
+                f" Business Value: {insight.business_value}",
+                f" Visualization: {insight.visualization}",
+                f" Key Metrics: {', '.join(insight.metrics)}",
+                f" SQL:\n{insight.sql_query}\n",
+            ]
+        )
 
     def _format_error_response(self, response: AnalysisResponse) -> str:
         """Format error responses"""
@@ -241,18 +257,15 @@ class ChatInterface:
     def format_response(self, response: AnalysisResponse) -> str:
         """Format response based on type"""
         formatter = self.response_formatters.get(
-            response.response_type, 
-            self._format_error_response
+            response.response_type, self._format_error_response
         )
         return formatter(response)
 
     def save_to_history(self, user_input: str, response: AnalysisResponse):
         """Save interaction to chat history"""
-        self.chat_history.append({
-            "timestamp": pd.Timestamp.now(),
-            "user": user_input,
-            "ai": response
-        })
+        self.chat_history.append(
+            {"timestamp": pd.Timestamp.now(), "user": user_input, "ai": response}
+        )
 
     def start_chat(self):
         """Run interactive chat session"""
@@ -265,7 +278,8 @@ class ChatInterface:
                 print("👋 Exiting chat. Have a great day!")
                 break
 
-            response = self.generator.generate_insights(user_input, self.table_metadata)
+            response = self.generator.generate_insights(
+                user_input, self.table_metadata)
             formatted_response = self.format_response(response)
             print(formatted_response)
             self.save_to_history(user_input, response)
@@ -277,12 +291,11 @@ if __name__ == "__main__":
     table_metadata = {
         "sales_data": [
             "product_id",
-            "product_name",
             "sales_amount",
             "sale_date",
             "region",
         ],
-        "product_info": ["product_id", "category", "price"],
+        "product_info": ["product_id", "product_name", "category", "price"],
     }
 
     # Initialize Chat Interface
